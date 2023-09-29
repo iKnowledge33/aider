@@ -1,4 +1,3 @@
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,7 +5,6 @@ from unittest.mock import MagicMock, patch
 
 import git
 import openai
-import requests
 
 from aider import models
 from aider.coders import Coder
@@ -24,7 +22,84 @@ class TestCoder(unittest.TestCase):
     def tearDown(self):
         self.patcher.stop()
 
-    def test_should_dirty_commit(self):
+    def test_allowed_to_edit(self):
+        with GitTemporaryDirectory():
+            repo = git.Repo()
+
+            fname = Path("added.txt")
+            fname.touch()
+            repo.git.add(str(fname))
+
+            fname = Path("repo.txt")
+            fname.touch()
+            repo.git.add(str(fname))
+
+            repo.git.commit("-m", "init")
+
+            # YES!
+            io = InputOutput(yes=True)
+            coder = Coder.create(models.GPT4, None, io, fnames=["added.txt"])
+
+            self.assertTrue(coder.allowed_to_edit("added.txt"))
+            self.assertTrue(coder.allowed_to_edit("repo.txt"))
+            self.assertTrue(coder.allowed_to_edit("new.txt"))
+
+            self.assertIn("repo.txt", str(coder.abs_fnames))
+            self.assertIn("new.txt", str(coder.abs_fnames))
+
+            self.assertFalse(coder.need_commit_before_edits)
+
+    def test_allowed_to_edit_no(self):
+        with GitTemporaryDirectory():
+            repo = git.Repo()
+
+            fname = Path("added.txt")
+            fname.touch()
+            repo.git.add(str(fname))
+
+            fname = Path("repo.txt")
+            fname.touch()
+            repo.git.add(str(fname))
+
+            repo.git.commit("-m", "init")
+
+            # say NO
+            io = InputOutput(yes=False)
+
+            coder = Coder.create(models.GPT4, None, io, fnames=["added.txt"])
+
+            self.assertTrue(coder.allowed_to_edit("added.txt"))
+            self.assertFalse(coder.allowed_to_edit("repo.txt"))
+            self.assertFalse(coder.allowed_to_edit("new.txt"))
+
+            self.assertNotIn("repo.txt", str(coder.abs_fnames))
+            self.assertNotIn("new.txt", str(coder.abs_fnames))
+
+            self.assertFalse(coder.need_commit_before_edits)
+
+    def test_allowed_to_edit_dirty(self):
+        with GitTemporaryDirectory():
+            repo = git.Repo()
+
+            fname = Path("added.txt")
+            fname.touch()
+            repo.git.add(str(fname))
+
+            repo.git.commit("-m", "init")
+
+            # say NO
+            io = InputOutput(yes=False)
+
+            coder = Coder.create(models.GPT4, None, io, fnames=["added.txt"])
+
+            self.assertTrue(coder.allowed_to_edit("added.txt"))
+            self.assertFalse(coder.need_commit_before_edits)
+
+            fname.write_text("dirty!")
+            self.assertTrue(coder.allowed_to_edit("added.txt"))
+            self.assertTrue(coder.need_commit_before_edits)
+
+    def test_get_last_modified(self):
         # Mock the IO object
         mock_io = MagicMock()
 
@@ -38,11 +113,14 @@ class TestCoder(unittest.TestCase):
             # Initialize the Coder object with the mocked IO and mocked repo
             coder = Coder.create(models.GPT4, None, mock_io)
 
-            fname.write_text("hi")
-            self.assertTrue(coder.should_dirty_commit("hi"))
+            mod = coder.get_last_modified()
 
-            self.assertFalse(coder.should_dirty_commit("/exit"))
-            self.assertFalse(coder.should_dirty_commit("/help"))
+            fname.write_text("hi")
+            mod_newer = coder.get_last_modified()
+            self.assertLess(mod, mod_newer)
+
+            fname.unlink()
+            self.assertEqual(coder.get_last_modified(), 0)
 
     def test_check_for_file_mentions(self):
         # Mock the IO object
@@ -54,7 +132,7 @@ class TestCoder(unittest.TestCase):
         # Mock the git repo
         mock = MagicMock()
         mock.return_value = set(["file1.txt", "file2.py"])
-        coder.get_tracked_files = mock
+        coder.repo.get_tracked_files = mock
 
         # Call the check_for_file_mentions method
         coder.check_for_file_mentions("Please check file1.txt and file2.py")
@@ -98,7 +176,7 @@ class TestCoder(unittest.TestCase):
 
         mock = MagicMock()
         mock.return_value = set(["file1.txt", "file2.py"])
-        coder.get_tracked_files = mock
+        coder.repo.get_tracked_files = mock
 
         # Call the check_for_file_mentions method
         coder.check_for_file_mentions("Please check file1.txt and file2.py")
@@ -129,7 +207,7 @@ class TestCoder(unittest.TestCase):
 
             mock = MagicMock()
             mock.return_value = set([str(fname), str(other_fname)])
-            coder.get_tracked_files = mock
+            coder.repo.get_tracked_files = mock
 
             # Call the check_for_file_mentions method
             coder.check_for_file_mentions(f"Please check {fname}!")
@@ -147,117 +225,12 @@ class TestCoder(unittest.TestCase):
 
             mock = MagicMock()
             mock.return_value = set([str(fname)])
-            coder.get_tracked_files = mock
+            coder.repo.get_tracked_files = mock
 
-            dump(fname)
             # Call the check_for_file_mentions method
             coder.check_for_file_mentions(f"Please check `{fname}`")
 
             self.assertEqual(coder.abs_fnames, set([str(fname.resolve())]))
-
-    def test_get_commit_message(self):
-        # Mock the IO object
-        mock_io = MagicMock()
-
-        # Initialize the Coder object with the mocked IO and mocked repo
-        coder = Coder.create(models.GPT4, None, mock_io)
-
-        # Mock the send method to set partial_response_content and return False
-        def mock_send(*args, **kwargs):
-            coder.partial_response_content = "a good commit message"
-            return False
-
-        coder.send = MagicMock(side_effect=mock_send)
-
-        # Call the get_commit_message method with dummy diff and context
-        result = coder.get_commit_message("dummy diff", "dummy context")
-
-        # Assert that the returned message is the expected one
-        self.assertEqual(result, "a good commit message")
-
-    def test_get_commit_message_strip_quotes(self):
-        # Mock the IO object
-        mock_io = MagicMock()
-
-        # Initialize the Coder object with the mocked IO and mocked repo
-        coder = Coder.create(models.GPT4, None, mock_io)
-
-        # Mock the send method to set partial_response_content and return False
-        def mock_send(*args, **kwargs):
-            coder.partial_response_content = "a good commit message"
-            return False
-
-        coder.send = MagicMock(side_effect=mock_send)
-
-        # Call the get_commit_message method with dummy diff and context
-        result = coder.get_commit_message("dummy diff", "dummy context")
-
-        # Assert that the returned message is the expected one
-        self.assertEqual(result, "a good commit message")
-
-    def test_get_commit_message_no_strip_unmatched_quotes(self):
-        # Mock the IO object
-        mock_io = MagicMock()
-
-        # Initialize the Coder object with the mocked IO and mocked repo
-        coder = Coder.create(models.GPT4, None, mock_io)
-
-        # Mock the send method to set partial_response_content and return False
-        def mock_send(*args, **kwargs):
-            coder.partial_response_content = 'a good "commit message"'
-            return False
-
-        coder.send = MagicMock(side_effect=mock_send)
-
-        # Call the get_commit_message method with dummy diff and context
-        result = coder.get_commit_message("dummy diff", "dummy context")
-
-        # Assert that the returned message is the expected one
-        self.assertEqual(result, 'a good "commit message"')
-
-    @patch("aider.coders.base_coder.openai.ChatCompletion.create")
-    @patch("builtins.print")
-    def test_send_with_retries_rate_limit_error(self, mock_print, mock_chat_completion_create):
-        # Mock the IO object
-        mock_io = MagicMock()
-
-        # Initialize the Coder object with the mocked IO and mocked repo
-        coder = Coder.create(models.GPT4, None, mock_io)
-
-        # Set up the mock to raise RateLimitError on
-        # the first call and return None on the second call
-        mock_chat_completion_create.side_effect = [
-            openai.error.RateLimitError("Rate limit exceeded"),
-            None,
-        ]
-
-        # Call the send_with_retries method
-        coder.send_with_retries("model", ["message"], None)
-
-        # Assert that print was called once
-        mock_print.assert_called_once()
-
-    @patch("aider.coders.base_coder.openai.ChatCompletion.create")
-    @patch("builtins.print")
-    def test_send_with_retries_connection_error(self, mock_print, mock_chat_completion_create):
-        # Mock the IO object
-        mock_io = MagicMock()
-
-        # Initialize the Coder object with the mocked IO and mocked repo
-        coder = Coder.create(models.GPT4, None, mock_io)
-
-        # Set up the mock to raise ConnectionError on the first call
-        # and return None on the second call
-        mock_chat_completion_create.side_effect = [
-            requests.exceptions.ConnectionError("Connection error"),
-            None,
-        ]
-
-        # Call the send_with_retries method
-        coder.send_with_retries("model", ["message"], None)
-
-        # Assert that print was called once
-        mock_print.assert_called_once()
 
     def test_run_with_file_deletion(self):
         # Create a few temporary files
@@ -396,49 +369,232 @@ class TestCoder(unittest.TestCase):
         with self.assertRaises(openai.error.InvalidRequestError):
             coder.run(with_message="hi")
 
-    def test_get_tracked_files(self):
-        # Create a temporary directory
-        tempdir = Path(tempfile.mkdtemp())
+    def test_new_file_edit_one_commit(self):
+        """A new file shouldn't get pre-committed before the GPT edit commit"""
+        with GitTemporaryDirectory():
+            repo = git.Repo()
 
-        # Initialize a git repository in the temporary directory and set user name and email
-        repo = git.Repo.init(tempdir)
-        repo.config_writer().set_value("user", "name", "Test User").release()
-        repo.config_writer().set_value("user", "email", "testuser@example.com").release()
+            fname = Path("file.txt")
 
-        # Create three empty files and add them to the git repository
-        filenames = ["README.md", "subdir/fänny.md", "systemüber/blick.md", 'file"with"quotes.txt']
-        created_files = []
-        for filename in filenames:
-            file_path = tempdir / filename
-            try:
-                file_path.parent.mkdir(parents=True, exist_ok=True)
-                file_path.touch()
-                repo.git.add(str(file_path))
-                created_files.append(Path(filename))
-            except OSError:
-                # windows won't allow files with quotes, that's ok
-                self.assertIn('"', filename)
-                self.assertEqual(os.name, "nt")
+            io = InputOutput(yes=True)
+            coder = Coder.create(models.GPT4, "diff", io=io, fnames=[str(fname)])
 
-        self.assertTrue(len(created_files) >= 3)
+            self.assertTrue(fname.exists())
 
-        repo.git.commit("-m", "added")
+            # make sure it was not committed
+            with self.assertRaises(git.exc.GitCommandError):
+                list(repo.iter_commits(repo.active_branch.name))
 
-        # Create a Coder object on the temporary directory
-        coder = Coder.create(
-            models.GPT4,
-            None,
-            io=InputOutput(),
-            fnames=[str(tempdir / filenames[0])],
-        )
+            def mock_send(*args, **kwargs):
+                coder.partial_response_content = f"""
+Do this:
 
-        tracked_files = coder.get_tracked_files()
+{str(fname)}
+<<<<<<< HEAD
+=======
+new
+>>>>>>> updated
 
-        # On windows, paths will come back \like\this, so normalize them back to Paths
-        tracked_files = [Path(fn) for fn in tracked_files]
+"""
+                coder.partial_response_function_call = dict()
 
-        # Assert that coder.get_tracked_files() returns the three filenames
-        self.assertEqual(set(tracked_files), set(created_files))
+            coder.send = MagicMock(side_effect=mock_send)
+            coder.repo.get_commit_message = MagicMock()
+            coder.repo.get_commit_message.return_value = "commit message"
 
-    if __name__ == "__main__":
-        unittest.main()
+            coder.run(with_message="hi")
+
+            content = fname.read_text()
+            self.assertEqual(content, "new\n")
+
+            num_commits = len(list(repo.iter_commits(repo.active_branch.name)))
+            self.assertEqual(num_commits, 1)
+
+    def test_only_commit_gpt_edited_file(self):
+        """
+        Only commit file that gpt edits, not other dirty files.
+        Also ensure commit msg only depends on diffs from the GPT edited file.
+        """
+
+        with GitTemporaryDirectory():
+            repo = git.Repo()
+
+            fname1 = Path("file1.txt")
+            fname2 = Path("file2.txt")
+
+            fname1.write_text("one\n")
+            fname2.write_text("two\n")
+
+            repo.git.add(str(fname1))
+            repo.git.add(str(fname2))
+            repo.git.commit("-m", "new")
+
+            # DIRTY!
+            fname1.write_text("ONE\n")
+
+            io = InputOutput(yes=True)
+            coder = Coder.create(models.GPT4, "diff", io=io, fnames=[str(fname1), str(fname2)])
+
+            def mock_send(*args, **kwargs):
+                coder.partial_response_content = f"""
+Do this:
+
+{str(fname2)}
+<<<<<<< HEAD
+two
+=======
+TWO
+>>>>>>> updated
+
+"""
+                coder.partial_response_function_call = dict()
+
+            def mock_get_commit_message(diffs, context):
+                self.assertNotIn("one", diffs)
+                self.assertNotIn("ONE", diffs)
+                return "commit message"
+
+            coder.send = MagicMock(side_effect=mock_send)
+            coder.repo.get_commit_message = MagicMock(side_effect=mock_get_commit_message)
+
+            coder.run(with_message="hi")
+
+            content = fname2.read_text()
+            self.assertEqual(content, "TWO\n")
+
+            self.assertTrue(repo.is_dirty(path=str(fname1)))
+
+    def test_gpt_edit_to_dirty_file(self):
+        """A dirty file should be committed before the GPT edits are committed"""
+
+        with GitTemporaryDirectory():
+            repo = git.Repo()
+
+            fname = Path("file.txt")
+            fname.write_text("one\n")
+            repo.git.add(str(fname))
+
+            fname2 = Path("other.txt")
+            fname2.write_text("other\n")
+            repo.git.add(str(fname2))
+
+            repo.git.commit("-m", "new")
+
+            # dirty
+            fname.write_text("two\n")
+            fname2.write_text("OTHER\n")
+
+            io = InputOutput(yes=True)
+            coder = Coder.create(models.GPT4, "diff", io=io, fnames=[str(fname)])
+
+            def mock_send(*args, **kwargs):
+                coder.partial_response_content = f"""
+Do this:
+
+{str(fname)}
+<<<<<<< HEAD
+two
+=======
+three
+>>>>>>> updated
+
+"""
+                coder.partial_response_function_call = dict()
+
+            saved_diffs = []
+
+            def mock_get_commit_message(diffs, context):
+                saved_diffs.append(diffs)
+                return "commit message"
+
+            coder.repo.get_commit_message = MagicMock(side_effect=mock_get_commit_message)
+            coder.send = MagicMock(side_effect=mock_send)
+
+            coder.run(with_message="hi")
+
+            content = fname.read_text()
+            self.assertEqual(content, "three\n")
+
+            num_commits = len(list(repo.iter_commits(repo.active_branch.name)))
+            self.assertEqual(num_commits, 3)
+
+            diff = repo.git.diff(["HEAD~2", "HEAD~1"])
+            self.assertIn("one", diff)
+            self.assertIn("two", diff)
+            self.assertNotIn("three", diff)
+            self.assertNotIn("other", diff)
+            self.assertNotIn("OTHER", diff)
+
+            diff = saved_diffs[0]
+            self.assertIn("one", diff)
+            self.assertIn("two", diff)
+            self.assertNotIn("three", diff)
+            self.assertNotIn("other", diff)
+            self.assertNotIn("OTHER", diff)
+
+            diff = repo.git.diff(["HEAD~1", "HEAD"])
+            self.assertNotIn("one", diff)
+            self.assertIn("two", diff)
+            self.assertIn("three", diff)
+            self.assertNotIn("other", diff)
+            self.assertNotIn("OTHER", diff)
+
+            diff = saved_diffs[1]
+            self.assertNotIn("one", diff)
+            self.assertIn("two", diff)
+            self.assertIn("three", diff)
+            self.assertNotIn("other", diff)
+            self.assertNotIn("OTHER", diff)
+
+            self.assertEqual(len(saved_diffs), 2)
+
+    def test_gpt_edit_to_existing_file_not_in_repo(self):
+        with GitTemporaryDirectory():
+            repo = git.Repo()
+
+            fname = Path("file.txt")
+            fname.write_text("one\n")
+
+            fname2 = Path("other.txt")
+            fname2.write_text("other\n")
+            repo.git.add(str(fname2))
+
+            repo.git.commit("-m", "initial")
+
+            io = InputOutput(yes=True)
+            coder = Coder.create(models.GPT4, "diff", io=io, fnames=[str(fname)])
+
+            def mock_send(*args, **kwargs):
+                coder.partial_response_content = f"""
+Do this:
+
+{str(fname)}
+<<<<<<< HEAD
+one
+=======
+two
+>>>>>>> updated
+
+"""
+                coder.partial_response_function_call = dict()
+
+            saved_diffs = []
+
+            def mock_get_commit_message(diffs, context):
+                saved_diffs.append(diffs)
+                return "commit message"
+
+            coder.repo.get_commit_message = MagicMock(side_effect=mock_get_commit_message)
+            coder.send = MagicMock(side_effect=mock_send)
+
+            coder.run(with_message="hi")
+
+            content = fname.read_text()
+            self.assertEqual(content, "two\n")
+
+            diff = saved_diffs[0]
+            self.assertIn("file.txt", diff)
+
+
+if __name__ == "__main__":
+    unittest.main()

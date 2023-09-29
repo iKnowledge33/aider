@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -9,14 +10,38 @@ import openai
 from aider import __version__, models
 from aider.coders import Coder
 from aider.io import InputOutput
+from aider.repo import GitRepo
+from aider.versioncheck import check_version
+
+from .dump import dump  # noqa: F401
 
 
 def get_git_root():
+    """Try and guess the git repo, since the conf.yml can be at the repo root"""
     try:
         repo = git.Repo(search_parent_directories=True)
         return repo.working_tree_dir
     except git.InvalidGitRepositoryError:
         return None
+
+
+def guessed_wrong_repo(io, git_root, fnames, git_dname):
+    """After we parse the args, we can determine the real repo. Did we guess wrong?"""
+
+    try:
+        check_repo = Path(GitRepo(io, fnames, git_dname).root).resolve()
+    except FileNotFoundError:
+        return
+
+    # we had no guess, rely on the "true" repo result
+    if not git_root:
+        return str(check_repo)
+
+    git_root = Path(git_root).resolve()
+    if check_repo == git_root:
+        return
+
+    return str(check_repo)
 
 
 def setup_git(git_root, io):
@@ -26,7 +51,11 @@ def setup_git(git_root, io):
     if not io.confirm_ask("No git repo found, create one to track GPT's changes (recommended)?"):
         return
 
-    repo = git.Repo.init(Path.cwd())
+    git_root = str(Path.cwd().resolve())
+
+    check_gitignore(git_root, io, False)
+
+    repo = git.Repo.init(git_root)
     global_git_config = git.GitConfigParser([str(Path.home() / ".gitconfig")], read_only=True)
     with repo.config_writer() as git_config:
         if not global_git_config.has_option("user", "name"):
@@ -37,9 +66,8 @@ def setup_git(git_root, io):
             io.tool_error('Update git email with: git config --global user.email "you@example.com"')
 
     io.tool_output("Git repository created in the current working directory.")
-    git_root = str(Path.cwd().resolve())
-    check_gitignore(git_root, io, False)
-    return git_root
+
+    return repo.working_tree_dir
 
 
 def check_gitignore(git_root, io, ask=True):
@@ -67,11 +95,14 @@ def check_gitignore(git_root, io, ask=True):
     io.tool_output(f"Added {pat} to .gitignore")
 
 
-def main(args=None, input=None, output=None):
-    if args is None:
-        args = sys.argv[1:]
+def main(argv=None, input=None, output=None, force_git_root=None):
+    if argv is None:
+        argv = sys.argv[1:]
 
-    git_root = get_git_root()
+    if force_git_root:
+        git_root = force_git_root
+    else:
+        git_root = get_git_root()
 
     conf_fname = Path(".aider.conf.yml")
 
@@ -97,7 +128,7 @@ def main(args=None, input=None, output=None):
         "files",
         metavar="FILE",
         nargs="*",
-        help="a list of source code files to edit with GPT (optional)",
+        help="the directory of a git repo, or a list of files to edit with GPT (optional)",
     )
     core_group.add_argument(
         "--openai-api-key",
@@ -112,11 +143,23 @@ def main(args=None, input=None, output=None):
         help=f"Specify the model to use for the main chat (default: {models.GPT4.name})",
     )
     core_group.add_argument(
+        "--skip-model-availability-check",
+        metavar="SKIP_MODEL_AVAILABILITY_CHECK",
+        default=False,
+        help="Override to skip model availability check (default: False)",
+    )
+    core_group.add_argument(
         "-3",
         action="store_const",
         dest="model",
         const=models.GPT35_16k.name,
         help=f"Use {models.GPT35_16k.name} model for the main chat (gpt-4 is better)",
+    )
+    core_group.add_argument(
+        "--voice-language",
+        metavar="VOICE_LANGUAGE",
+        default="en",
+        help="Specify the language for voice using ISO 639-1 code (default: auto)",
     )
 
     ##########
@@ -196,22 +239,15 @@ def main(args=None, input=None, output=None):
     )
     output_group.add_argument(
         "--pretty",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="Enable pretty, colorized output (default: True)",
+        help="Enable/disable pretty, colorized output (default: True)",
     )
     output_group.add_argument(
-        "--no-pretty",
-        action="store_false",
-        dest="pretty",
-        help="Disable pretty, colorized output",
-    )
-    output_group.add_argument(
-        "--no-stream",
-        action="store_false",
-        dest="stream",
+        "--stream",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="Disable streaming responses",
+        help="Enable/disable streaming responses (default: True)",
     )
     output_group.add_argument(
         "--user-input-color",
@@ -251,43 +287,28 @@ def main(args=None, input=None, output=None):
     ##########
     git_group = parser.add_argument_group("Git Settings")
     git_group.add_argument(
-        "--no-git",
-        action="store_false",
-        dest="git",
+        "--git",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="Do not look for a git repo",
+        help="Enable/disable looking for a git repo (default: True)",
     )
     git_group.add_argument(
         "--auto-commits",
-        action="store_true",
-        dest="auto_commits",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="Enable auto commit of GPT changes (default: True)",
-    )
-    git_group.add_argument(
-        "--no-auto-commits",
-        action="store_false",
-        dest="auto_commits",
-        help="Disable auto commit of GPT changes (implies --no-dirty-commits)",
+        help="Enable/disable auto commit of GPT changes (default: True)",
     )
     git_group.add_argument(
         "--dirty-commits",
-        action="store_true",
-        dest="dirty_commits",
-        help="Enable commits when repo is found dirty",
+        action=argparse.BooleanOptionalAction,
         default=True,
-    )
-    git_group.add_argument(
-        "--no-dirty-commits",
-        action="store_false",
-        dest="dirty_commits",
-        help="Disable commits when repo is found dirty",
+        help="Enable/disable commits when repo is found dirty (default: True)",
     )
     git_group.add_argument(
         "--dry-run",
-        action="store_true",
-        help="Perform a dry run without modifying files (default: False)",
+        action=argparse.BooleanOptionalAction,
         default=False,
+        help="Enable/disable performing a dry run without modifying files (default: False)",
     )
 
     ##########
@@ -340,7 +361,7 @@ def main(args=None, input=None, output=None):
         ),
     )
 
-    args = parser.parse_args(args)
+    args = parser.parse_args(argv)
 
     if args.dark_mode:
         args.user_input_color = "#32FF32"
@@ -367,9 +388,42 @@ def main(args=None, input=None, output=None):
         dry_run=args.dry_run,
     )
 
+    fnames = [str(Path(fn).resolve()) for fn in args.files]
+    if len(args.files) > 1:
+        good = True
+        for fname in args.files:
+            if Path(fname).is_dir():
+                io.tool_error(f"{fname} is a directory, not provided alone.")
+                good = False
+        if not good:
+            io.tool_error(
+                "Provide either a single directory of a git repo, or a list of one or more files."
+            )
+            return 1
+
+    git_dname = None
+    if len(args.files) == 1:
+        if Path(args.files[0]).is_dir():
+            if args.git:
+                git_dname = str(Path(args.files[0]).resolve())
+                fnames = []
+            else:
+                io.tool_error(f"{args.files[0]} is a directory, but --no-git selected.")
+                return 1
+
+    # We can't know the git repo for sure until after parsing the args.
+    # If we guessed wrong, reparse because that changes things like
+    # the location of the config.yml and history files.
+    if args.git and not force_git_root:
+        right_repo_root = guessed_wrong_repo(io, git_root, fnames, git_dname)
+        if right_repo_root:
+            return main(argv, input, output, right_repo_root)
+
     io.tool_output(f"Aider v{__version__}")
 
-    if 'VSCODE_GIT_IPC_HANDLE' in os.environ:
+    check_version(io.tool_error)
+
+    if "VSCODE_GIT_IPC_HANDLE" in os.environ:
         args.pretty = False
         io.tool_output("VSCode terminal detected, pretty output has been disabled.")
 
@@ -401,8 +455,6 @@ def main(args=None, input=None, output=None):
             )
         return 1
 
-    main_model = models.Model(args.model)
-
     openai.api_key = args.openai_api_key
     for attr in ("base", "type", "version", "deployment_id", "engine"):
         arg_key = f"openai_api_{attr}"
@@ -412,24 +464,33 @@ def main(args=None, input=None, output=None):
             setattr(openai, mod_key, val)
             io.tool_output(f"Setting openai.{mod_key}={val}")
 
-    coder = Coder.create(
-        main_model,
-        args.edit_format,
-        io,
-        ##
-        fnames=args.files,
-        pretty=args.pretty,
-        show_diffs=args.show_diffs,
-        auto_commits=args.auto_commits,
-        dirty_commits=args.dirty_commits,
-        dry_run=args.dry_run,
-        map_tokens=args.map_tokens,
-        verbose=args.verbose,
-        assistant_output_color=args.assistant_output_color,
-        code_theme=args.code_theme,
-        stream=args.stream,
-        use_git=args.git,
-    )
+    main_model = models.Model.create(args.model)
+
+    try:
+        coder = Coder.create(
+            main_model,
+            args.edit_format,
+            io,
+            args.skip_model_availability_check,
+            ##
+            fnames=fnames,
+            git_dname=git_dname,
+            pretty=args.pretty,
+            show_diffs=args.show_diffs,
+            auto_commits=args.auto_commits,
+            dirty_commits=args.dirty_commits,
+            dry_run=args.dry_run,
+            map_tokens=args.map_tokens,
+            verbose=args.verbose,
+            assistant_output_color=args.assistant_output_color,
+            code_theme=args.code_theme,
+            stream=args.stream,
+            use_git=args.git,
+            voice_language=args.voice_language,
+        )
+    except ValueError as err:
+        io.tool_error(str(err))
+        return 1
 
     if args.show_repo_map:
         repo_map = coder.get_repo_map()
@@ -437,17 +498,16 @@ def main(args=None, input=None, output=None):
             io.tool_output(repo_map)
         return
 
-    if args.dirty_commits:
-        coder.commit(ask=True, which="repo_files")
-
     if args.apply:
         content = io.read_text(args.apply)
         if content is None:
             return
-        coder.apply_updates(content)
+        coder.partial_response_content = content
+        coder.apply_updates()
         return
 
     io.tool_output("Use /help to see in-chat commands, run with --help to see cmd line args")
+
     if args.message:
         io.tool_output()
         coder.run(with_message=args.message)

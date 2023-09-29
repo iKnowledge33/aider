@@ -1,11 +1,60 @@
 # Release history
 
-### GitHub main branch
+### v0.14.0
 
-- Force `--no-pretty` if aider detects it is running inside a VSCode terminal.
+- [Support for Claude2 and other LLMs via OpenRouter](https://aider.chat/docs/faq.html#accessing-other-llms-with-openrouter) by @joshuavial
+- Documentation for [running the aider benchmarking suite](https://github.com/paul-gauthier/aider/tree/main/benchmark)
+- Aider now requires Python >= 3.9
+
+
+### v0.13.0
+
+- [Only git commit dirty files that GPT tries to edit](https://aider.chat/docs/faq.html#how-did-v0130-change-git-usage)
+- Send chat history as prompt/context for Whisper voice transcription
+- Added `--voice-language` switch to constrain `/voice` to transcribe to a specific language
+- Late-bind importing `sounddevice`, as it was slowing down aider startup
+- Improved --foo/--no-foo switch handling for command line and yml config settings
+
+### v0.12.0
+
+- [Voice-to-code](https://aider.chat/docs/voice.html) support, which allows you to code with your voice.
+- Fixed bug where /diff was causing crash.
+- Improved prompting for gpt-4, refactor of editblock coder.
+- [Benchmarked](https://aider.chat/docs/benchmarks.html) at 63.2% for gpt-4/diff, no regression.
+
+### v0.11.1
+
+- Added a progress bar when initially creating a repo map.
+- Fixed bad commit message when adding new file to empty repo.
+- Fixed corner case of pending chat history summarization when dirty committing.
+- Fixed corner case of undefined `text` when using `--no-pretty`.
+- Fixed /commit bug from repo refactor, added test coverage.
+- [Benchmarked](https://aider.chat/docs/benchmarks.html) at 53.4% for gpt-3.5/whole (no regression).
+
+### v0.11.0
+
+- Automatically summarize chat history to avoid exhausting context window.
+- More detail on dollar costs when running with `--no-stream`
+- Stronger GPT-3.5 prompt against skipping/eliding code in replies (51.9% [benchmark](https://aider.chat/docs/benchmarks.html), no regression)
+- Defend against GPT-3.5 or non-OpenAI models suggesting filenames surrounded by asterisks.
+- Refactored GitRepo code out of the Coder class.
+
+### v0.10.1
+
+- /add and /drop always use paths relative to the git root
+- Encourage GPT to use language like "add files to the chat" to ask users for permission to edit them.
+
+### v0.10.0
+
+- Added `/git` command to run git from inside aider chats.
 - Use Meta-ENTER (Esc+ENTER in some environments) to enter multiline chat messages.
 - Create a `.gitignore` with `.aider*` to prevent users from accidentaly adding aider files to git.
-- Added `/git` command to run git from inside aider chats.
+- Check pypi for newer versions and notify user.
+- Updated keyboard interrupt logic so that 2 ^C in 2 seconds always forces aider to exit.
+- Provide GPT with detailed error if it makes a bad edit block, ask for a retry.
+- Force `--no-pretty` if aider detects it is running inside a VSCode terminal.
+- [Benchmarked](https://aider.chat/docs/benchmarks.html) at 64.7% for gpt-4/diff (no regression)
+
 
 ### v0.9.0
 
@@ -14,7 +63,7 @@
 - Improved output when retrying connections to the OpenAI API
 - Redacted api key from `--verbose` output
 - Bugfix: recognize and add files in subdirectories mentioned by user or GPT
-- [Benchmarked](https://aider.chat/docs/benchmarks.html) at 53.8% for gpt-3.5-turbo/whole
+- [Benchmarked](https://aider.chat/docs/benchmarks.html) at 53.8% for gpt-3.5-turbo/whole (no regression)
 
 ### v0.8.3
 
